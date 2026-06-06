@@ -167,9 +167,9 @@ func (c *Client) Add(ctx context.Context, nzbURL, name, category string, priorit
 		}
 	}
 	encoded := base64.StdEncoding.EncodeToString(content)
-	// append params: name, content, category, priority, dupecheck, dupekey, dupescore,
-	//                ppparameters (array), addtoTop, addpaused, urlpassword, postscript
-	params := []any{name, encoded, category, priority, false, "", 0, []any{}, false, false, "", ""}
+	// append params (NZBGet v26.1 fork): name, content, category, priority, addToTop,
+	//                addPaused, dupeKey, dupeScore, dupeMode, autoCategory, ppParameters (array)
+	params := []any{name, encoded, category, priority, false, false, "", 0, "SCORE", false, []any{}}
 	var resp appendResponse
 	if err := c.call(ctx, "append", params, &resp); err != nil {
 		return 0, fmt.Errorf("add nzb: %w", err)
