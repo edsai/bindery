@@ -125,22 +125,10 @@ func (e *Engine) Run(ctx context.Context, userID int64) error {
 	slog.Info("recommender: work-dedup + author-cap",
 		"before", beforeDedup, "after", len(candidates), "authorCap", maxAuthorNewPerAuthor)
 
-	// Determine serendipity allocation.
-	serendipityCount := 10
-	scoredCount := 90
-	if len(candidates) < 100 {
-		serendipityCount = max(1, len(candidates)/20) // ~5%
-		scoredCount = len(candidates)
-	}
-
-	// Truncate scored candidates.
-	if len(candidates) > scoredCount {
-		candidates = candidates[:scoredCount]
-	}
-
-	// Inject serendipity picks (only with enough books for genre data).
+	// Broaden the pool with serendipity picks (only with enough books for genre
+	// data) before filtering and final selection.
 	if profile.TotalBooks >= 20 {
-		serendipity := GenerateSerendipity(ctx, e.books, e.series, profile, serendipityCount)
+		serendipity := GenerateSerendipity(ctx, e.books, e.series, profile, serendipityTarget)
 		for i := range serendipity {
 			serendipity[i].Score = Score(serendipity[i], profile)
 		}
@@ -148,21 +136,109 @@ func (e *Engine) Run(ctx context.Context, userID int64) error {
 		slog.Info("recommender: serendipity candidates", "count", len(serendipity))
 	}
 
-	// Hard-filter: remove already-owned, dismissed, or excluded-author candidates.
+	// Hard-filter the full pool BEFORE selection so the reserved discovery quota
+	// draws only from candidates that actually survive (filter-before-truncate).
 	candidates = hardFilter(candidates, profile)
 
-	// Take top 100.
-	if len(candidates) > 100 {
-		candidates = candidates[:100]
+	// Final selection: top maxRecommendations by score, reserving up to
+	// discoveryQuota slots for discovery picks that would otherwise be buried
+	// below the author_new score floor.
+	beforeSelect := len(candidates)
+	discoveryAvail := 0
+	for _, c := range candidates {
+		if isDiscovery(c.RecType) {
+			discoveryAvail++
+		}
 	}
+	candidates = selectWithQuota(candidates, maxRecommendations, discoveryQuota)
+	selectedDiscovery := 0
+	for _, c := range candidates {
+		if isDiscovery(c.RecType) {
+			selectedDiscovery++
+		}
+	}
+	slog.Info("recommender: final selection",
+		"filtered", beforeSelect, "selected", len(candidates),
+		"discoveryAvailable", discoveryAvail, "discoverySelected", selectedDiscovery,
+		"discoveryQuota", discoveryQuota)
 
 	slog.Info("recommender: persisting", "count", len(candidates), "userId", userID)
 	return e.recs.ReplaceBatch(ctx, userID, candidates)
 }
 
-// maxAuthorNewPerAuthor caps how many author_new candidates a single monitored
-// author may contribute, so a prolific author cannot flood the Discover list.
-const maxAuthorNewPerAuthor = 3
+const (
+	// maxAuthorNewPerAuthor caps how many author_new candidates a single
+	// monitored author may contribute, so a prolific author cannot flood the
+	// Discover list.
+	maxAuthorNewPerAuthor = 3
+	// maxRecommendations is the size of the persisted Discover list.
+	maxRecommendations = 100
+	// discoveryQuota reserves up to this many slots in the persisted list for
+	// discovery picks (genre/list/serendipity) that would otherwise be buried
+	// below the author_new score floor — the lever that surfaces new authors and
+	// books the user doesn't already own.
+	discoveryQuota = 15
+	// serendipityTarget is how many serendipity picks to generate per run.
+	serendipityTarget = 10
+)
+
+// isDiscovery reports whether a candidate is a discovery pick — something
+// outside the user's owned authors and started series. These are the candidates
+// the reserved quota protects.
+func isDiscovery(recType string) bool {
+	switch recType {
+	case models.RecTypeGenrePopular, models.RecTypeGenreSimilar,
+		models.RecTypeListCross, models.RecTypeSerendipity:
+		return true
+	}
+	return false
+}
+
+// selectWithQuota returns up to total candidates, reserving up to quota slots
+// for discovery picks that would otherwise be cut for scoring below the
+// author_new floor. The top `quota` discovery picks by score are guaranteed
+// inclusion; the remaining slots are filled by the highest-scored of everything
+// else. The result is score-sorted. Input need not be pre-sorted.
+func selectWithQuota(candidates []models.RecommendationCandidate, total, quota int) []models.RecommendationCandidate {
+	sorted := make([]models.RecommendationCandidate, len(candidates))
+	copy(sorted, candidates)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Score > sorted[j].Score
+	})
+	if len(sorted) <= total {
+		return sorted
+	}
+
+	// Reserve the top `quota` discovery picks (sorted is score-descending).
+	reserved := make(map[int]bool)
+	for i, c := range sorted {
+		if len(reserved) >= quota {
+			break
+		}
+		if isDiscovery(c.RecType) {
+			reserved[i] = true
+		}
+	}
+
+	out := make([]models.RecommendationCandidate, 0, total)
+	for i := range sorted {
+		if reserved[i] {
+			out = append(out, sorted[i])
+		}
+	}
+	for i := range sorted {
+		if len(out) >= total {
+			break
+		}
+		if !reserved[i] {
+			out = append(out, sorted[i])
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Score > out[j].Score
+	})
+	return out
+}
 
 // dedupeByWork collapses candidates that share a DedupKey (the same work across
 // editions) down to a single best edition, preferring an edition whose language

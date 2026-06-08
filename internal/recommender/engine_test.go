@@ -2,6 +2,7 @@ package recommender
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/vavallee/bindery/internal/db"
@@ -262,6 +263,99 @@ func TestCapAuthorNew(t *testing.T) {
 		if ids[i] != want[i] {
 			t.Fatalf("cap=2 order: got %v, want %v", ids, want)
 		}
+	}
+}
+
+// --- selectWithQuota (P1: reserved external-discovery quota) ---
+
+func countDiscovery(cands []models.RecommendationCandidate) int {
+	n := 0
+	for _, c := range cands {
+		if isDiscovery(c.RecType) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestSelectWithQuota_ReservesDiscoverySlots is the core P1 case: many
+// high-scoring author_new candidates and some low-scoring discovery picks; the
+// quota must force the discovery picks in despite being below the score cut.
+func TestSelectWithQuota_ReservesDiscoverySlots(t *testing.T) {
+	var cands []models.RecommendationCandidate
+	for i := 0; i < 100; i++ {
+		cands = append(cands, models.RecommendationCandidate{
+			ForeignID: fmt.Sprintf("an%d", i), RecType: models.RecTypeAuthorNew, Score: 0.5,
+		})
+	}
+	for i := 0; i < 30; i++ {
+		cands = append(cands, models.RecommendationCandidate{
+			ForeignID: fmt.Sprintf("gp%d", i), RecType: models.RecTypeGenrePopular, Score: 0.1,
+		})
+	}
+	got := selectWithQuota(cands, 20, 5)
+	if len(got) != 20 {
+		t.Fatalf("expected 20 selected, got %d", len(got))
+	}
+	if d := countDiscovery(got); d != 5 {
+		t.Errorf("expected exactly 5 reserved discovery picks, got %d", d)
+	}
+	// Result must be score-sorted.
+	for i := 1; i < len(got); i++ {
+		if got[i-1].Score < got[i].Score {
+			t.Fatalf("result not score-sorted at %d: %v > %v", i, got[i-1].Score, got[i].Score)
+		}
+	}
+}
+
+func TestSelectWithQuota_NoDiscoveryReturnsTopN(t *testing.T) {
+	var cands []models.RecommendationCandidate
+	for i := 0; i < 50; i++ {
+		cands = append(cands, models.RecommendationCandidate{
+			ForeignID: fmt.Sprintf("an%d", i), RecType: models.RecTypeAuthorNew, Score: float64(50 - i),
+		})
+	}
+	got := selectWithQuota(cands, 20, 5)
+	if len(got) != 20 {
+		t.Fatalf("expected 20, got %d", len(got))
+	}
+	if countDiscovery(got) != 0 {
+		t.Error("no discovery candidates exist; none should appear")
+	}
+	if got[0].Score != 50 {
+		t.Errorf("expected highest-scored first, got %v", got[0].Score)
+	}
+}
+
+func TestSelectWithQuota_FewerDiscoveryThanQuota(t *testing.T) {
+	var cands []models.RecommendationCandidate
+	for i := 0; i < 100; i++ {
+		cands = append(cands, models.RecommendationCandidate{
+			ForeignID: fmt.Sprintf("an%d", i), RecType: models.RecTypeAuthorNew, Score: 0.5,
+		})
+	}
+	for i := 0; i < 3; i++ {
+		cands = append(cands, models.RecommendationCandidate{
+			ForeignID: fmt.Sprintf("gp%d", i), RecType: models.RecTypeGenrePopular, Score: 0.1,
+		})
+	}
+	got := selectWithQuota(cands, 20, 5)
+	if len(got) != 20 {
+		t.Fatalf("expected 20, got %d", len(got))
+	}
+	if d := countDiscovery(got); d != 3 {
+		t.Errorf("all 3 discovery picks should be included, got %d", d)
+	}
+}
+
+func TestSelectWithQuota_PoolSmallerThanTotal(t *testing.T) {
+	cands := []models.RecommendationCandidate{
+		{ForeignID: "a", RecType: models.RecTypeAuthorNew, Score: 0.5},
+		{ForeignID: "b", RecType: models.RecTypeGenrePopular, Score: 0.1},
+	}
+	got := selectWithQuota(cands, 20, 5)
+	if len(got) != 2 {
+		t.Fatalf("pool smaller than total should return all, got %d", len(got))
 	}
 }
 
