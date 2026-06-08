@@ -341,14 +341,37 @@ func canonicalLang(code string) string {
 	}
 }
 
-// languageMatches reports whether a candidate language matches the preferred
-// language under canonical folding. An empty preferred language matches nothing
-// (no preference to satisfy); an empty candidate language never matches.
+// allowedLanguages resolves the search.preferredLanguage setting to a canonical
+// allowed-list for the recommender's language filter. "" and "any" are the
+// app-wide no-filter sentinels (cf. models.ParseAllowedLanguages and
+// indexer.FilterByLanguage) and return nil, which models.IsLanguageAllowed
+// treats as "everything passes". Any other value is folded to the canonical
+// 3-letter form so the 2-letter UI setting ("en") matches 3-letter book tags
+// ("eng").
+func allowedLanguages(preferred string) []string {
+	p := strings.ToLower(strings.TrimSpace(preferred))
+	if p == "" || p == "any" {
+		return nil
+	}
+	return []string{canonicalLang(p)}
+}
+
+// languageMatches reports whether a candidate language is one the user prefers,
+// under canonical folding. Used only as an edition tiebreak in dedupeByWork. A
+// no-preference setting ("any"/empty) or an empty candidate language is not a
+// positive match.
 func languageMatches(code, preferred string) bool {
-	if preferred == "" || code == "" {
+	allowed := allowedLanguages(preferred)
+	if len(allowed) == 0 || strings.TrimSpace(code) == "" {
 		return false
 	}
-	return canonicalLang(code) == canonicalLang(preferred)
+	folded := canonicalLang(code)
+	for _, a := range allowed {
+		if a == folded {
+			return true
+		}
+	}
+	return false
 }
 
 // genreToSubjectSlug converts a genre string (e.g. "Science Fiction") to an

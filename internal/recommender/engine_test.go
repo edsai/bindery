@@ -193,6 +193,25 @@ func TestClassifyDrop_NoPreferredLanguageDisablesFilter(t *testing.T) {
 	}
 }
 
+// TestClassifyDrop_AnyLanguageDisablesFilter covers the "any" sentinel that the
+// settings UI offers alongside "en". "any" means no language preference, so
+// every language (including foreign) must pass — consistent with how
+// models.ParseAllowedLanguages and indexer.FilterByLanguage treat "any".
+func TestClassifyDrop_AnyLanguageDisablesFilter(t *testing.T) {
+	p := &UserProfile{
+		OwnedForeignIDs:     map[string]bool{},
+		DismissedForeignIDs: map[string]bool{},
+		ExcludedAuthors:     map[string]bool{},
+		PreferredLanguage:   "any",
+	}
+	for _, lang := range []string{"eng", "nld", "spa", ""} {
+		c := models.RecommendationCandidate{ForeignID: "x", Title: "x", Language: lang, RatingsCount: 100, Rating: 4.0}
+		if got := classifyDrop(c, p, map[string]bool{}); got != "" {
+			t.Errorf("PreferredLanguage=any must pass lang=%q, got drop %q", lang, got)
+		}
+	}
+}
+
 // TestDedupeByWork covers P0b: editions of the same work (shared DedupKey)
 // collapse to the single best edition, preferring a preferred-language match,
 // then ratings count. This is what removes the Spanish "Cuchillo de agua" in

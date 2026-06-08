@@ -327,16 +327,13 @@ func classifyDrop(c models.RecommendationCandidate, p *UserProfile, seen map[str
 	if c.AuthorName != "" && p.ExcludedAuthors[strings.ToLower(c.AuthorName)] {
 		return dropExcludedAuthor
 	}
-	// Language gate. The preferred-language setting is stored 2-letter ("en")
-	// while book tags are 3-letter ("eng"), so both sides are folded to a
-	// canonical form before comparison. An empty candidate language is unknown,
-	// not foreign, so it passes (unknownFail=false) — edition collapse (P0b)
-	// handles foreign editions that happen to carry no language tag.
-	if p.PreferredLanguage != "" {
-		allowed := []string{canonicalLang(p.PreferredLanguage)}
-		if !models.IsLanguageAllowed(canonicalLang(c.Language), allowed, false) {
-			return dropLanguage
-		}
+	// Language gate. Honor the search.preferredLanguage setting: "any"/empty mean
+	// no filter, otherwise the 2-letter setting ("en") is folded to the canonical
+	// 3-letter form so it matches book tags ("eng"). An empty candidate language
+	// is unknown, not foreign, so it passes (unknownFail=false) — edition collapse
+	// (P0b) handles foreign editions that happen to carry no language tag.
+	if !models.IsLanguageAllowed(canonicalLang(c.Language), allowedLanguages(p.PreferredLanguage), false) {
+		return dropLanguage
 	}
 	// Suppress candidates with too few ratings, but only for types where we have no
 	// other quality signal. Monitored-author, series, and genre-popular candidates
