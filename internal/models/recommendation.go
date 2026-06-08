@@ -59,4 +59,9 @@ type RecommendationCandidate struct {
 	SeriesPos    string
 	Score        float64
 	Reason       string
+	// DedupKey is the canonical cross-edition work key (#940), copied from the
+	// source Book. The recommender uses it to collapse multiple editions of the
+	// same work to a single best edition. Empty for candidates built from
+	// external sources (e.g. OpenLibrary) that have no Book row.
+	DedupKey string
 }

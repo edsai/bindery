@@ -313,6 +313,44 @@ func looksLikeCollection(title string) bool {
 	return false
 }
 
+// canonicalLang folds a language code to a canonical 3-letter form so the
+// 2-letter codes used by the search.preferredLanguage setting (e.g. "en") match
+// the 3-letter ISO 639-2 tags stored on books and returned by OpenLibrary
+// (e.g. "eng"). Unrecognized codes are returned lowercased and unchanged, so an
+// exotic configuration still compares equal to itself rather than silently
+// rejecting everything.
+func canonicalLang(code string) string {
+	c := strings.ToLower(strings.TrimSpace(code))
+	switch c {
+	case "en", "eng":
+		return "eng"
+	case "es", "spa":
+		return "spa"
+	case "fr", "fre", "fra":
+		return "fra"
+	case "de", "ger", "deu":
+		return "ger"
+	case "nl", "nld", "dut":
+		return "nld"
+	case "it", "ita":
+		return "ita"
+	case "pt", "por":
+		return "por"
+	default:
+		return c
+	}
+}
+
+// languageMatches reports whether a candidate language matches the preferred
+// language under canonical folding. An empty preferred language matches nothing
+// (no preference to satisfy); an empty candidate language never matches.
+func languageMatches(code, preferred string) bool {
+	if preferred == "" || code == "" {
+		return false
+	}
+	return canonicalLang(code) == canonicalLang(preferred)
+}
+
 // genreToSubjectSlug converts a genre string (e.g. "Science Fiction") to an
 // OpenLibrary subject slug (e.g. "science_fiction").
 func genreToSubjectSlug(genre string) string {
@@ -334,6 +372,7 @@ func bookToCandidate(b *models.Book) models.RecommendationCandidate {
 		ReleaseDate:  b.ReleaseDate,
 		Language:     b.Language,
 		MediaType:    b.MediaType,
+		DedupKey:     b.DedupKey,
 	}
 	if c.MediaType == "" {
 		c.MediaType = models.MediaTypeEbook

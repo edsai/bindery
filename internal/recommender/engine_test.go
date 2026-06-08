@@ -148,6 +148,123 @@ func TestClassifyDrop(t *testing.T) {
 	}
 }
 
+// TestClassifyDrop_LanguageCodeNormalization covers the headline bug: the
+// preferred language is stored 2-letter ("en") but book tags are 3-letter
+// ("eng"). The gate must treat them as equal, while still dropping genuinely
+// foreign editions and passing empty (unknown) languages.
+func TestClassifyDrop_LanguageCodeNormalization(t *testing.T) {
+	p := &UserProfile{
+		OwnedForeignIDs:     map[string]bool{},
+		DismissedForeignIDs: map[string]bool{},
+		ExcludedAuthors:     map[string]bool{},
+		PreferredLanguage:   "en",
+	}
+	seen := map[string]bool{}
+	cases := []struct {
+		name string
+		lang string
+		want dropReason
+	}{
+		{"eng-matches-en", "eng", dropReason("")},
+		{"en-matches-en", "en", dropReason("")},
+		{"empty-passes", "", dropReason("")},
+		{"dutch-dropped", "nld", dropLanguage},
+		{"spanish-dropped", "spa", dropLanguage},
+	}
+	for _, tc := range cases {
+		c := models.RecommendationCandidate{ForeignID: tc.name, Title: "x", Language: tc.lang, RatingsCount: 100, Rating: 4.0}
+		if got := classifyDrop(c, p, seen); got != tc.want {
+			t.Errorf("%s: lang=%q -> %q, want %q", tc.name, tc.lang, got, tc.want)
+		}
+	}
+}
+
+func TestClassifyDrop_NoPreferredLanguageDisablesFilter(t *testing.T) {
+	p := &UserProfile{
+		OwnedForeignIDs:     map[string]bool{},
+		DismissedForeignIDs: map[string]bool{},
+		ExcludedAuthors:     map[string]bool{},
+		PreferredLanguage:   "",
+	}
+	c := models.RecommendationCandidate{ForeignID: "A", Title: "x", Language: "nld", RatingsCount: 100, Rating: 4.0}
+	if got := classifyDrop(c, p, map[string]bool{}); got != "" {
+		t.Errorf("empty PreferredLanguage should disable the language filter, got %q", got)
+	}
+}
+
+// TestDedupeByWork covers P0b: editions of the same work (shared DedupKey)
+// collapse to the single best edition, preferring a preferred-language match,
+// then ratings count. This is what removes the Spanish "Cuchillo de agua" in
+// favor of the English "The Water Knife".
+func TestDedupeByWork_KeepsBestEdition(t *testing.T) {
+	p := &UserProfile{PreferredLanguage: "en"}
+	cands := []models.RecommendationCandidate{
+		{ForeignID: "ES", DedupKey: "water-knife", Title: "Cuchillo de agua", Language: "", Score: 0.35, RatingsCount: 10},
+		{ForeignID: "EN", DedupKey: "water-knife", Title: "The Water Knife", Language: "eng", Score: 0.35, RatingsCount: 5000},
+		{ForeignID: "OTHER", DedupKey: "other-work", Title: "Unrelated", Language: "eng", Score: 0.30},
+		{ForeignID: "NODEDUP", DedupKey: "", Title: "No key", Language: "eng", Score: 0.20},
+	}
+	got := dedupeByWork(cands, p)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 after work-dedup, got %d: %+v", len(got), got)
+	}
+	for _, c := range got {
+		if c.ForeignID == "ES" {
+			t.Error("Spanish edition should have been removed in favor of the English edition")
+		}
+	}
+	// The kept edition of the shared work must be the English one.
+	var keptWaterKnife string
+	for _, c := range got {
+		if c.DedupKey == "water-knife" {
+			keptWaterKnife = c.ForeignID
+		}
+	}
+	if keptWaterKnife != "EN" {
+		t.Errorf("kept edition of shared work = %q, want EN", keptWaterKnife)
+	}
+}
+
+func TestDedupeByWork_EmptyKeyPassesThrough(t *testing.T) {
+	p := &UserProfile{PreferredLanguage: "en"}
+	cands := []models.RecommendationCandidate{
+		{ForeignID: "A", DedupKey: "", Title: "a", Score: 0.3},
+		{ForeignID: "B", DedupKey: "", Title: "b", Score: 0.2},
+	}
+	got := dedupeByWork(cands, p)
+	if len(got) != 2 {
+		t.Fatalf("empty-DedupKey candidates must pass through untouched, got %d", len(got))
+	}
+}
+
+// TestCapAuthorNew covers P0c: no single monitored author may flood the list.
+func TestCapAuthorNew(t *testing.T) {
+	a1 := int64(1)
+	a2 := int64(2)
+	cands := []models.RecommendationCandidate{
+		{ForeignID: "a1-1", RecType: models.RecTypeAuthorNew, AuthorID: &a1, Score: 0.9},
+		{ForeignID: "a1-2", RecType: models.RecTypeAuthorNew, AuthorID: &a1, Score: 0.8},
+		{ForeignID: "a1-3", RecType: models.RecTypeAuthorNew, AuthorID: &a1, Score: 0.7},
+		{ForeignID: "a1-4", RecType: models.RecTypeAuthorNew, AuthorID: &a1, Score: 0.6},
+		{ForeignID: "a2-1", RecType: models.RecTypeAuthorNew, AuthorID: &a2, Score: 0.5},
+		{ForeignID: "gp", RecType: models.RecTypeGenrePopular, Score: 0.4},
+	}
+	got := capAuthorNew(cands, 2)
+	var ids []string
+	for _, c := range got {
+		ids = append(ids, c.ForeignID)
+	}
+	want := []string{"a1-1", "a1-2", "a2-1", "gp"}
+	if len(ids) != len(want) {
+		t.Fatalf("cap=2: got %v, want %v", ids, want)
+	}
+	for i := range want {
+		if ids[i] != want[i] {
+			t.Fatalf("cap=2 order: got %v, want %v", ids, want)
+		}
+	}
+}
+
 func TestClassifyDrop_DupForeignID(t *testing.T) {
 	p := &UserProfile{
 		OwnedForeignIDs:     map[string]bool{},

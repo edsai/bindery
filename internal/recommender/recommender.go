@@ -115,6 +115,16 @@ func (e *Engine) Run(ctx context.Context, userID int64) error {
 		return candidates[i].Score > candidates[j].Score
 	})
 
+	// Collapse same-work editions to one best edition (P0b), then cap per-author
+	// contribution (P0c). Both run on the full scored pool before truncation so
+	// the slots freed by dropped editions and capped authors go to other works
+	// and authors rather than being lost to the top-N cut.
+	beforeDedup := len(candidates)
+	candidates = dedupeByWork(candidates, profile)
+	candidates = capAuthorNew(candidates, maxAuthorNewPerAuthor)
+	slog.Info("recommender: work-dedup + author-cap",
+		"before", beforeDedup, "after", len(candidates), "authorCap", maxAuthorNewPerAuthor)
+
 	// Determine serendipity allocation.
 	serendipityCount := 10
 	scoredCount := 90
@@ -150,6 +160,68 @@ func (e *Engine) Run(ctx context.Context, userID int64) error {
 	return e.recs.ReplaceBatch(ctx, userID, candidates)
 }
 
+// maxAuthorNewPerAuthor caps how many author_new candidates a single monitored
+// author may contribute, so a prolific author cannot flood the Discover list.
+const maxAuthorNewPerAuthor = 3
+
+// dedupeByWork collapses candidates that share a DedupKey (the same work across
+// editions) down to a single best edition, preferring an edition whose language
+// matches the user's preferred language, then more ratings, then a higher score.
+// Candidates with an empty DedupKey (e.g. external OpenLibrary picks) pass
+// through untouched. Input order is otherwise preserved, so a score-sorted slice
+// stays score-sorted.
+func dedupeByWork(candidates []models.RecommendationCandidate, p *UserProfile) []models.RecommendationCandidate {
+	best := make(map[string]int)
+	for i, c := range candidates {
+		if c.DedupKey == "" {
+			continue
+		}
+		if j, ok := best[c.DedupKey]; !ok || betterEdition(c, candidates[j], p) {
+			best[c.DedupKey] = i
+		}
+	}
+	out := make([]models.RecommendationCandidate, 0, len(candidates))
+	for i, c := range candidates {
+		if c.DedupKey == "" || best[c.DedupKey] == i {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// betterEdition reports whether edition a better represents a work than edition
+// b: prefer a preferred-language match, then more ratings, then a higher score.
+func betterEdition(a, b models.RecommendationCandidate, p *UserProfile) bool {
+	aMatch := languageMatches(a.Language, p.PreferredLanguage)
+	bMatch := languageMatches(b.Language, p.PreferredLanguage)
+	if aMatch != bMatch {
+		return aMatch
+	}
+	if a.RatingsCount != b.RatingsCount {
+		return a.RatingsCount > b.RatingsCount
+	}
+	return a.Score > b.Score
+}
+
+// capAuthorNew limits how many author_new candidates a single monitored author
+// may contribute. Candidates are assumed score-sorted, so the highest-scored
+// works per author are kept. Other candidate types pass through untouched, and
+// input order is preserved.
+func capAuthorNew(candidates []models.RecommendationCandidate, maxPerAuthor int) []models.RecommendationCandidate {
+	perAuthor := make(map[int64]int)
+	out := make([]models.RecommendationCandidate, 0, len(candidates))
+	for _, c := range candidates {
+		if c.RecType == models.RecTypeAuthorNew && c.AuthorID != nil {
+			if perAuthor[*c.AuthorID] >= maxPerAuthor {
+				continue
+			}
+			perAuthor[*c.AuthorID]++
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
 // dropReason names why hardFilter rejected a candidate (or "" when it is kept).
 // The values double as structured-log keys for the P0 drop-reason histogram.
 type dropReason string
@@ -179,8 +251,16 @@ func classifyDrop(c models.RecommendationCandidate, p *UserProfile, seen map[str
 	if c.AuthorName != "" && p.ExcludedAuthors[strings.ToLower(c.AuthorName)] {
 		return dropExcludedAuthor
 	}
-	if p.PreferredLanguage != "" && c.Language != "" && c.Language != p.PreferredLanguage {
-		return dropLanguage
+	// Language gate. The preferred-language setting is stored 2-letter ("en")
+	// while book tags are 3-letter ("eng"), so both sides are folded to a
+	// canonical form before comparison. An empty candidate language is unknown,
+	// not foreign, so it passes (unknownFail=false) — edition collapse (P0b)
+	// handles foreign editions that happen to carry no language tag.
+	if p.PreferredLanguage != "" {
+		allowed := []string{canonicalLang(p.PreferredLanguage)}
+		if !models.IsLanguageAllowed(canonicalLang(c.Language), allowed, false) {
+			return dropLanguage
+		}
 	}
 	// Suppress candidates with too few ratings, but only for types where we have no
 	// other quality signal. Monitored-author, series, and genre-popular candidates
