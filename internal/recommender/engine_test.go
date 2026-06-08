@@ -116,6 +116,51 @@ func TestHardFilter_Dedupes(t *testing.T) {
 	}
 }
 
+func TestClassifyDrop(t *testing.T) {
+	p := &UserProfile{
+		OwnedForeignIDs:     map[string]bool{"OWN": true},
+		DismissedForeignIDs: map[string]bool{"DIS": true},
+		ExcludedAuthors:     map[string]bool{"bad author": true},
+		PreferredLanguage:   "eng",
+	}
+	tests := []struct {
+		name string
+		c    models.RecommendationCandidate
+		want dropReason
+	}{
+		{"owned", models.RecommendationCandidate{ForeignID: "OWN", RatingsCount: 100, Rating: 4.0}, dropOwned},
+		{"dismissed", models.RecommendationCandidate{ForeignID: "DIS", RatingsCount: 100, Rating: 4.0}, dropDismissed},
+		{"excludedAuthor", models.RecommendationCandidate{ForeignID: "A", AuthorName: "Bad Author", RatingsCount: 100, Rating: 4.0}, dropExcludedAuthor},
+		{"language", models.RecommendationCandidate{ForeignID: "B", Language: "spa", RatingsCount: 100, Rating: 4.0}, dropLanguage},
+		{"lowRatingsCount", models.RecommendationCandidate{ForeignID: "C", RecType: models.RecTypeListCross, RatingsCount: 10, Rating: 4.0}, dropLowRatingsCount},
+		{"lowRating", models.RecommendationCandidate{ForeignID: "D", RatingsCount: 100, Rating: 2.5}, dropLowRating},
+		{"collection", models.RecommendationCandidate{ForeignID: "E", Title: "The Complete Stories", RatingsCount: 100, Rating: 4.0}, dropCollection},
+		{"trustedSourceSkipsRatingGate", models.RecommendationCandidate{ForeignID: "F", RecType: models.RecTypeAuthorNew, RatingsCount: 0, Rating: 0}, dropReason("")},
+		{"keep", models.RecommendationCandidate{ForeignID: "G", Title: "A Fine Book", RatingsCount: 100, Rating: 4.0}, dropReason("")},
+	}
+	seen := map[string]bool{}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := classifyDrop(tt.c, p, seen); got != tt.want {
+				t.Errorf("classifyDrop(%s) = %q, want %q", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClassifyDrop_DupForeignID(t *testing.T) {
+	p := &UserProfile{
+		OwnedForeignIDs:     map[string]bool{},
+		DismissedForeignIDs: map[string]bool{},
+		ExcludedAuthors:     map[string]bool{},
+	}
+	c := models.RecommendationCandidate{ForeignID: "X", Title: "dup", RatingsCount: 100, Rating: 4.0}
+	seen := map[string]bool{"X": true}
+	if got := classifyDrop(c, p, seen); got != dropDupForeignID {
+		t.Errorf("classifyDrop on seen ForeignID = %q, want %q", got, dropDupForeignID)
+	}
+}
+
 // --- shared DB-integrated fixtures ---
 
 func seedSeries(t *testing.T, f profileFixtures, foreignID, title string) *models.Series {

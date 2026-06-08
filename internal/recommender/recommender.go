@@ -150,47 +150,88 @@ func (e *Engine) Run(ctx context.Context, userID int64) error {
 	return e.recs.ReplaceBatch(ctx, userID, candidates)
 }
 
-// hardFilter removes candidates that should not be shown.
+// dropReason names why hardFilter rejected a candidate (or "" when it is kept).
+// The values double as structured-log keys for the P0 drop-reason histogram.
+type dropReason string
+
+const (
+	dropOwned           dropReason = "owned"
+	dropDismissed       dropReason = "dismissed"
+	dropExcludedAuthor  dropReason = "excludedAuthor"
+	dropLanguage        dropReason = "language"
+	dropLowRatingsCount dropReason = "lowRatingsCount"
+	dropLowRating       dropReason = "lowRating"
+	dropCollection      dropReason = "collection"
+	dropDupForeignID    dropReason = "dupForeignID"
+)
+
+// classifyDrop returns the reason hardFilter would reject c, or "" if c passes.
+// seen holds ForeignIDs already kept this pass (for dedup); classifyDrop does
+// not mutate it. The check order is significant — it determines which reason a
+// multiply-disqualified candidate is attributed to in the histogram.
+func classifyDrop(c models.RecommendationCandidate, p *UserProfile, seen map[string]bool) dropReason {
+	if p.OwnedForeignIDs[c.ForeignID] {
+		return dropOwned
+	}
+	if p.DismissedForeignIDs[c.ForeignID] {
+		return dropDismissed
+	}
+	if c.AuthorName != "" && p.ExcludedAuthors[strings.ToLower(c.AuthorName)] {
+		return dropExcludedAuthor
+	}
+	if p.PreferredLanguage != "" && c.Language != "" && c.Language != p.PreferredLanguage {
+		return dropLanguage
+	}
+	// Suppress candidates with too few ratings, but only for types where we have no
+	// other quality signal. Monitored-author, series, and genre-popular candidates
+	// come from trusted sources (user's own choices or OL's curated subject lists)
+	// and should not be gated on OL's sparse ratings data.
+	needsRatingSignal := c.RecType != models.RecTypeAuthorNew &&
+		c.RecType != models.RecTypeSeries &&
+		c.RecType != models.RecTypeGenrePopular &&
+		c.RecType != models.RecTypeGenreSimilar
+	if needsRatingSignal && c.RatingsCount < 50 {
+		return dropLowRatingsCount
+	}
+	// Suppress objectively poor books — only apply when there are enough ratings to trust the score.
+	if c.RatingsCount >= 50 && c.Rating > 0 && c.Rating < 3.0 {
+		return dropLowRating
+	}
+	if looksLikeCollection(c.Title) {
+		return dropCollection
+	}
+	if seen[c.ForeignID] {
+		return dropDupForeignID
+	}
+	return ""
+}
+
+// hardFilter removes candidates that should not be shown, and logs a per-reason
+// histogram of what it dropped (P0 instrumentation — diagnoses the candidate
+// collapse before any allocation changes).
 func hardFilter(candidates []models.RecommendationCandidate, p *UserProfile) []models.RecommendationCandidate {
 	var filtered []models.RecommendationCandidate
 	seen := make(map[string]bool)
+	drops := make(map[dropReason]int)
 	for _, c := range candidates {
-		if p.OwnedForeignIDs[c.ForeignID] {
-			continue
-		}
-		if p.DismissedForeignIDs[c.ForeignID] {
-			continue
-		}
-		if c.AuthorName != "" && p.ExcludedAuthors[strings.ToLower(c.AuthorName)] {
-			continue
-		}
-		if p.PreferredLanguage != "" && c.Language != "" && c.Language != p.PreferredLanguage {
-			continue
-		}
-		// Suppress candidates with too few ratings, but only for types where we have no
-		// other quality signal. Monitored-author, series, and genre-popular candidates
-		// come from trusted sources (user's own choices or OL's curated subject lists)
-		// and should not be gated on OL's sparse ratings data.
-		needsRatingSignal := c.RecType != models.RecTypeAuthorNew &&
-			c.RecType != models.RecTypeSeries &&
-			c.RecType != models.RecTypeGenrePopular &&
-			c.RecType != models.RecTypeGenreSimilar
-		if needsRatingSignal && c.RatingsCount < 50 {
-			continue
-		}
-		// Suppress objectively poor books — only apply when there are enough ratings to trust the score.
-		if c.RatingsCount >= 50 && c.Rating > 0 && c.Rating < 3.0 {
-			continue
-		}
-		if looksLikeCollection(c.Title) {
-			continue
-		}
-		// Deduplicate by foreign ID.
-		if seen[c.ForeignID] {
+		if r := classifyDrop(c, p, seen); r != "" {
+			drops[r]++
 			continue
 		}
 		seen[c.ForeignID] = true
 		filtered = append(filtered, c)
 	}
+	slog.Info("recommender: hardFilter drop reasons",
+		"input", len(candidates),
+		"kept", len(filtered),
+		"owned", drops[dropOwned],
+		"dismissed", drops[dropDismissed],
+		"excludedAuthor", drops[dropExcludedAuthor],
+		"language", drops[dropLanguage],
+		"lowRatingsCount", drops[dropLowRatingsCount],
+		"lowRating", drops[dropLowRating],
+		"collection", drops[dropCollection],
+		"dupForeignID", drops[dropDupForeignID],
+	)
 	return filtered
 }
