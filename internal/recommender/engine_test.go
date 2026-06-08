@@ -285,6 +285,38 @@ func TestCapAuthorNew(t *testing.T) {
 	}
 }
 
+// TestCapDiscoveryByAuthorName covers the franchise-flood fix: discovery picks
+// (genre_popular et al.) carry an author name but no AuthorID, so capAuthorNew
+// can't reach them; a name-keyed cap stops one author (e.g. a full Harry Potter
+// list) from monopolizing the reserved discovery slots.
+func TestCapDiscoveryByAuthorName(t *testing.T) {
+	cands := []models.RecommendationCandidate{
+		{ForeignID: "hp1", RecType: models.RecTypeGenrePopular, AuthorName: "J. K. Rowling", Score: 0.20},
+		{ForeignID: "hp2", RecType: models.RecTypeGenrePopular, AuthorName: "J. K. Rowling", Score: 0.19},
+		{ForeignID: "hp3", RecType: models.RecTypeGenrePopular, AuthorName: "J. K. Rowling", Score: 0.18},
+		{ForeignID: "hp4", RecType: models.RecTypeGenrePopular, AuthorName: "j. k. rowling", Score: 0.17}, // case-insensitive
+		{ForeignID: "wells", RecType: models.RecTypeGenrePopular, AuthorName: "H. G. Wells", Score: 0.15},
+		{ForeignID: "noname", RecType: models.RecTypeGenrePopular, AuthorName: "", Score: 0.14}, // no name → never capped
+		{ForeignID: "an1", RecType: models.RecTypeAuthorNew, AuthorName: "Seth Godin", Score: 0.5},
+		{ForeignID: "an2", RecType: models.RecTypeAuthorNew, AuthorName: "Seth Godin", Score: 0.49}, // author_new untouched by this cap
+		{ForeignID: "an3", RecType: models.RecTypeAuthorNew, AuthorName: "Seth Godin", Score: 0.48},
+	}
+	got := capDiscoveryByAuthorName(cands, 2)
+	var ids []string
+	for _, c := range got {
+		ids = append(ids, c.ForeignID)
+	}
+	want := []string{"hp1", "hp2", "wells", "noname", "an1", "an2", "an3"}
+	if len(ids) != len(want) {
+		t.Fatalf("got %v, want %v", ids, want)
+	}
+	for i := range want {
+		if ids[i] != want[i] {
+			t.Fatalf("order/contents: got %v, want %v", ids, want)
+		}
+	}
+}
+
 // --- selectWithQuota (P1: reserved external-discovery quota) ---
 
 func countDiscovery(cands []models.RecommendationCandidate) int {

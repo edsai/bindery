@@ -122,8 +122,10 @@ func (e *Engine) Run(ctx context.Context, userID int64) error {
 	beforeDedup := len(candidates)
 	candidates = dedupeByWork(candidates, profile)
 	candidates = capAuthorNew(candidates, maxAuthorNewPerAuthor)
+	candidates = capDiscoveryByAuthorName(candidates, maxDiscoveryPerAuthor)
 	slog.Info("recommender: work-dedup + author-cap",
-		"before", beforeDedup, "after", len(candidates), "authorCap", maxAuthorNewPerAuthor)
+		"before", beforeDedup, "after", len(candidates),
+		"authorCap", maxAuthorNewPerAuthor, "discoveryCap", maxDiscoveryPerAuthor)
 
 	// Broaden the pool with serendipity picks (only with enough books for genre
 	// data) before filtering and final selection.
@@ -171,6 +173,12 @@ const (
 	// monitored author may contribute, so a prolific author cannot flood the
 	// Discover list.
 	maxAuthorNewPerAuthor = 3
+	// maxDiscoveryPerAuthor caps how many discovery candidates a single author
+	// may contribute. Discovery picks (genre_popular et al.) carry an author name
+	// but no AuthorID, so capAuthorNew cannot reach them — this stops one
+	// franchise (e.g. a full Harry Potter list from an OL subject) from
+	// monopolizing the reserved discovery slots.
+	maxDiscoveryPerAuthor = 2
 	// maxRecommendations is the size of the persisted Discover list.
 	maxRecommendations = 100
 	// discoveryQuota reserves up to this many slots in the persisted list for
@@ -292,6 +300,29 @@ func capAuthorNew(candidates []models.RecommendationCandidate, maxPerAuthor int)
 				continue
 			}
 			perAuthor[*c.AuthorID]++
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// capDiscoveryByAuthorName limits how many discovery candidates a single author
+// may contribute, keyed on the (case-folded) author name. Discovery picks carry
+// an author name but no AuthorID, so capAuthorNew can't reach them. Candidates
+// are assumed score-sorted; non-discovery types and discovery picks without an
+// author name pass through untouched, and input order is preserved.
+func capDiscoveryByAuthorName(candidates []models.RecommendationCandidate, maxPerName int) []models.RecommendationCandidate {
+	perName := make(map[string]int)
+	out := make([]models.RecommendationCandidate, 0, len(candidates))
+	for _, c := range candidates {
+		if isDiscovery(c.RecType) {
+			name := strings.ToLower(strings.TrimSpace(c.AuthorName))
+			if name != "" {
+				if perName[name] >= maxPerName {
+					continue
+				}
+				perName[name]++
+			}
 		}
 		out = append(out, c)
 	}
