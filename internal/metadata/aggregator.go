@@ -200,6 +200,13 @@ func canonicalAuthorKey(name string) string {
 	return normalizeForDedup(uninvertAuthorName(name))
 }
 
+// CanonicalAuthorKey is the exported form of canonicalAuthorKey, so callers
+// (e.g. the API layer matching a search result's author name against the
+// library) identify authors the same way ResolveCanonicalAuthor does.
+func CanonicalAuthorKey(name string) string {
+	return canonicalAuthorKey(name)
+}
+
 // uninvertAuthorName converts "Last, First" to "First Last"; other forms are
 // returned unchanged (whitespace-trimmed).
 func uninvertAuthorName(name string) string {
