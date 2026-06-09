@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/vavallee/bindery/internal/indexer"
 	"github.com/vavallee/bindery/internal/models"
 )
 
@@ -207,6 +208,11 @@ func TestGenerateGenrePopular_Success(t *testing.T) {
 		}
 		if c.Reason == "" {
 			t.Error("expected non-empty Reason")
+		}
+		// DedupKey must be backfilled (OL genre-popular candidates arrive without
+		// one) so dedupeByWork can collapse cross-edition discovery dups.
+		if want := indexer.CanonicalDedupKey(c.Title); c.DedupKey != want {
+			t.Errorf("DedupKey for %q: want %q, got %q", c.Title, want, c.DedupKey)
 		}
 	}
 	if len(f.called) != 1 || f.called[0] != "fantasy" {

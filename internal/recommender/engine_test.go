@@ -134,6 +134,11 @@ func TestClassifyDrop(t *testing.T) {
 		{"excludedAuthor", models.RecommendationCandidate{ForeignID: "A", AuthorName: "Bad Author", RatingsCount: 100, Rating: 4.0}, dropExcludedAuthor},
 		{"language", models.RecommendationCandidate{ForeignID: "B", Language: "spa", RatingsCount: 100, Rating: 4.0}, dropLanguage},
 		{"lowRatingsCount", models.RecommendationCandidate{ForeignID: "C", RecType: models.RecTypeListCross, RatingsCount: 10, Rating: 4.0}, dropLowRatingsCount},
+		// genre_popular now carries real OL ratings (search.json) → gated, but at a
+		// modest bar: too few ratings drops (ratings-less classics/catalog noise),
+		// a well-rated pick survives.
+		{"genrePopularTooFewRatings", models.RecommendationCandidate{ForeignID: "GP1", RecType: models.RecTypeGenrePopular, Language: "eng", RatingsCount: 5, Rating: 4.2}, dropLowRatingsCount},
+		{"genrePopularWellRated", models.RecommendationCandidate{ForeignID: "GP2", RecType: models.RecTypeGenrePopular, Language: "eng", RatingsCount: 40, Rating: 4.2}, dropReason("")},
 		{"lowRating", models.RecommendationCandidate{ForeignID: "D", RatingsCount: 100, Rating: 2.5}, dropLowRating},
 		{"collection", models.RecommendationCandidate{ForeignID: "E", Title: "The Complete Stories", RatingsCount: 100, Rating: 4.0}, dropCollection},
 		{"trustedSourceSkipsRatingGate", models.RecommendationCandidate{ForeignID: "F", RecType: models.RecTypeAuthorNew, RatingsCount: 0, Rating: 0}, dropReason("")},

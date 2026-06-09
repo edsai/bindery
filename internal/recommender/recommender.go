@@ -188,7 +188,33 @@ const (
 	discoveryQuota = 15
 	// serendipityTarget is how many serendipity picks to generate per run.
 	serendipityTarget = 10
+	// genrePopularMinRatings is the ratings floor for genre_popular candidates.
+	// They now come from OL search.json sorted by rating (real ratings_count), so
+	// the top results for a major subject clear this easily, while ratings-less
+	// catalog noise (public-domain scans, foreign records) is dropped. A modest
+	// bar — not the strict low-trust one — so niche subjects aren't emptied.
+	genrePopularMinRatings = 20
+	// lowTrustMinRatings is the ratings floor for pure-discovery candidates with
+	// no other quality signal (list_cross, serendipity, untyped).
+	lowTrustMinRatings = 50
 )
+
+// minRatingsCount is the minimum community ratings a candidate of the given type
+// must carry to survive hardFilter. author_new and series come from the user's
+// own choices, and genre_similar is drawn from the user's own series rows — none
+// have a useful external ratings signal, so they are exempt (0). genre_popular is
+// gated at a modest bar (it now carries real OL ratings); everything else uses
+// the strict low-trust bar.
+func minRatingsCount(recType string) int {
+	switch recType {
+	case models.RecTypeAuthorNew, models.RecTypeSeries, models.RecTypeGenreSimilar:
+		return 0
+	case models.RecTypeGenrePopular:
+		return genrePopularMinRatings
+	default:
+		return lowTrustMinRatings
+	}
+}
 
 // isDiscovery reports whether a candidate is a discovery pick — something
 // outside the user's owned authors and started series. These are the candidates
@@ -366,15 +392,8 @@ func classifyDrop(c models.RecommendationCandidate, p *UserProfile, seen map[str
 	if !models.IsLanguageAllowed(canonicalLang(c.Language), allowedLanguages(p.PreferredLanguage), false) {
 		return dropLanguage
 	}
-	// Suppress candidates with too few ratings, but only for types where we have no
-	// other quality signal. Monitored-author, series, and genre-popular candidates
-	// come from trusted sources (user's own choices or OL's curated subject lists)
-	// and should not be gated on OL's sparse ratings data.
-	needsRatingSignal := c.RecType != models.RecTypeAuthorNew &&
-		c.RecType != models.RecTypeSeries &&
-		c.RecType != models.RecTypeGenrePopular &&
-		c.RecType != models.RecTypeGenreSimilar
-	if needsRatingSignal && c.RatingsCount < 50 {
+	// Suppress candidates with too few ratings, per a type-specific floor.
+	if min := minRatingsCount(c.RecType); c.RatingsCount < min {
 		return dropLowRatingsCount
 	}
 	// Suppress objectively poor books — only apply when there are enough ratings to trust the score.
