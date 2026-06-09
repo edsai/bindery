@@ -11,13 +11,21 @@ import (
 	"github.com/vavallee/bindery/internal/models"
 )
 
-// junkGenres are OpenLibrary subjects that add noise, not signal.
+// junkGenres are OpenLibrary subjects that add noise, not signal. Besides the
+// cataloging artifacts ("accessible book", "in library", …), this includes
+// editorial-list subjects such as "new york times bestseller" / "new york times
+// reviewed": OpenLibrary attaches them to popular books across every genre, so
+// they accrue a high TF-IDF weight and rank as a top "genre" — which then feeds
+// a cross-genre grab-bag of bestsellers into genre-popular discovery. They are
+// lists, not genres, and carry no taste signal.
 var junkGenres = map[string]bool{
-	"accessible book":  true,
-	"protected daisy":  true,
-	"in library":       true,
-	"large type books": true,
-	"nonfiction":       true,
+	"accessible book":           true,
+	"protected daisy":           true,
+	"in library":                true,
+	"large type books":          true,
+	"nonfiction":                true,
+	"new york times bestseller": true,
+	"new york times reviewed":   true,
 }
 
 // BuildProfile analyses the user's library and constructs a UserProfile used

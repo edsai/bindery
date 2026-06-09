@@ -145,6 +145,33 @@ func TestBuildProfile_GenreWeights(t *testing.T) {
 	}
 }
 
+func TestBuildProfile_FiltersBestsellerListSubjects(t *testing.T) {
+	// OpenLibrary attaches editorial-list subjects ("New York Times bestseller",
+	// "New York Times reviewed") to many books across every genre. They are not
+	// genres and add noise — when they rank as a top genre they feed a cross-genre
+	// grab-bag into genre-popular discovery. They must be filtered from the profile.
+	f := newProfileFixtures(t)
+	a := seedAuthor(t, f, "Author A", "OL1A", false)
+	seedBook(t, f, a.ID, "OL1W", "B1", []string{"New York Times bestseller", "Thriller"})
+	seedBook(t, f, a.ID, "OL2W", "B2", []string{"New York Times reviewed", "Thriller"})
+
+	p, err := BuildProfile(context.Background(), f.userID, f.books, f.authors, f.series, f.recs, f.settings)
+	if err != nil {
+		t.Fatalf("BuildProfile: %v", err)
+	}
+
+	if _, ok := p.GenreWeights["new york times bestseller"]; ok {
+		t.Error("'new york times bestseller' is a list subject, not a genre — should be filtered")
+	}
+	if _, ok := p.GenreWeights["new york times reviewed"]; ok {
+		t.Error("'new york times reviewed' is a list subject, not a genre — should be filtered")
+	}
+	// A real genre on the same books must survive.
+	if p.GenreWeights["thriller"] == 0 {
+		t.Error("expected non-zero weight for real genre 'thriller'")
+	}
+}
+
 func TestBuildProfile_OwnedAndAuthorCounts(t *testing.T) {
 	f := newProfileFixtures(t)
 	a := seedAuthor(t, f, "Prolific", "OL_PROLIFIC", true)
