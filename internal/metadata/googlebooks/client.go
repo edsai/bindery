@@ -5,6 +5,7 @@ package googlebooks
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,19 +20,38 @@ import (
 
 const baseURL = "https://www.googleapis.com/books/v1"
 
+// defaultDailyQueryCap keeps usage under Google's free 1,000-queries/project/day
+// quota with headroom (for clock skew and the in-memory limiter resetting on
+// restart). Override with WithDailyCap.
+const defaultDailyQueryCap = 900
+
+// errDailyCapReached signals the rolling-24h call cap was hit. Callers translate
+// it to an empty result so the search merge simply gets nothing from Google
+// Books — no spent quota, no error surfaced.
+var errDailyCapReached = errors.New("google books: daily query cap reached")
+
 // Client implements metadata.Provider for Google Books API.
 // Used primarily for description enrichment — OL descriptions are often sparse.
 type Client struct {
-	http   *http.Client
-	apiKey string // optional, increases quota from shared pool to 1000/day
+	http    *http.Client
+	apiKey  string // required: keyless requests share Google's exhausted global quota
+	limiter *dailyLimiter
 }
 
-// New creates a Google Books client. apiKey can be empty for basic access.
+// New creates a Google Books client.
 func New(apiKey string) *Client {
 	return &Client{
-		http:   &http.Client{Timeout: 10 * time.Second, Transport: httpsec.DefaultProxyTransport()},
-		apiKey: apiKey,
+		http:    &http.Client{Timeout: 10 * time.Second, Transport: httpsec.DefaultProxyTransport()},
+		apiKey:  apiKey,
+		limiter: newDailyLimiter(defaultDailyQueryCap),
 	}
+}
+
+// WithDailyCap overrides the rolling-24h call cap (queries kept under Google's
+// free 1,000/day quota). A value <= 0 disables the cap.
+func (c *Client) WithDailyCap(n int) *Client {
+	c.limiter = newDailyLimiter(n)
+	return c
 }
 
 func (c *Client) Name() string { return "googlebooks" }
@@ -63,6 +83,9 @@ func (c *Client) SearchBooks(ctx context.Context, query string) ([]models.Book, 
 
 	var resp volumeSearchResponse
 	if err := c.getJSON(ctx, u, &resp); err != nil {
+		if errors.Is(err, errDailyCapReached) {
+			return nil, nil // over the daily cap: contribute nothing to the merge
+		}
 		return nil, fmt.Errorf("search books: %w", err)
 	}
 
@@ -90,6 +113,9 @@ func (c *Client) GetBook(ctx context.Context, foreignID string) (*models.Book, e
 
 	var item volumeItem
 	if err := c.getJSON(ctx, u, &item); err != nil {
+		if errors.Is(err, errDailyCapReached) {
+			return nil, nil // over the daily cap: no data rather than spend quota
+		}
 		return nil, fmt.Errorf("get book %s: %w", foreignID, err)
 	}
 
@@ -145,6 +171,13 @@ func (c *Client) volumeToBook(item volumeItem) models.Book {
 }
 
 func (c *Client) getJSON(ctx context.Context, rawURL string, target interface{}) error {
+	// Daily quota guard: when the rolling-24h cap is reached, skip the call and
+	// report the provider as unavailable so the search merge silently drops it
+	// (rather than spending quota and risking a 429). All GB HTTP calls funnel
+	// through here, so this bounds total daily usage.
+	if !c.limiter.allow() {
+		return errDailyCapReached
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return err
