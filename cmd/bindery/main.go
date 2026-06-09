@@ -251,17 +251,17 @@ func main() {
 	}
 
 	var enrichers []metadata.Provider
-	// Google Books is always wired as an enricher. The volumes search API works
-	// without credentials, so keyless is the default and needs no setup; it just
-	// shares Google's unauthenticated per-IP quota and may occasionally 429 (the
-	// search merge skips a failing provider, so that degrades gracefully). Set a
-	// Google Books API key in settings to use a private quota instead.
-	gbAPIKey := googleBooksAPIKey(context.Background(), settingsRepo)
-	enrichers = append(enrichers, googlebooks.New(gbAPIKey))
-	if gbAPIKey != "" {
+	// Google Books requires an API key. Keyless requests are attributed to
+	// Google's shared global unauthenticated project (project_number 624717413613),
+	// whose daily quota is perpetually exhausted — it 429s on essentially every
+	// call, so wiring it keyless just adds a guaranteed-failing request to every
+	// search. Set a Google Books API key in settings (free; isolated per-project
+	// quota) to actually use it.
+	if gbAPIKey := googleBooksAPIKey(context.Background(), settingsRepo); gbAPIKey != "" {
+		enrichers = append(enrichers, googlebooks.New(gbAPIKey))
 		slog.Info("google books enrichment enabled", "auth", "api-key")
 	} else {
-		slog.Info("google books enrichment enabled", "auth", "keyless")
+		slog.Info("google books enrichment disabled (no API key; keyless shares an exhausted global quota)")
 	}
 	hcClient := hardcover.New().WithTokenSource(func(ctx context.Context) string {
 		return api.GetHardcoverAPIToken(ctx, settingsRepo)
