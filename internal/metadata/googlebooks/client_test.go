@@ -243,6 +243,25 @@ func TestGetBook_StripsGBPrefix(t *testing.T) {
 	}
 }
 
+func TestSearchBooks_KeylessOmitsKeyParam(t *testing.T) {
+	// Keyless is the default deployment mode: the search must still issue a
+	// request, just without a key= param.
+	var gotURL string
+	c := &Client{
+		http: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			gotURL = r.URL.String()
+			return mockResponse(t, http.StatusOK, volumeSearchResponse{}), nil
+		})},
+		// apiKey intentionally empty
+	}
+	if _, err := c.SearchBooks(context.Background(), "dune"); err != nil {
+		t.Fatalf("keyless SearchBooks: %v", err)
+	}
+	if gotURL == "" || strings.Contains(gotURL, "key=") {
+		t.Errorf("keyless search must issue a request without key=, got %q", gotURL)
+	}
+}
+
 func TestGetBook_WithAPIKey(t *testing.T) {
 	var gotURL string
 	c := &Client{
