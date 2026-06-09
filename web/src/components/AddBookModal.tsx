@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { api, Book } from '../api/client'
+import MediaBadge from './MediaBadge'
 
 interface Props {
   onClose: () => void
@@ -113,7 +114,10 @@ export default function AddBookModal({ onClose, onAdded }: Props) {
                     <img src={book.imageUrl} alt="" className="w-10 h-14 object-cover rounded flex-shrink-0" />
                   )}
                   <div className="flex-1 min-w-0">
-                    <div className="font-medium text-sm truncate">{book.title}</div>
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="font-medium text-sm truncate">{book.title}</span>
+                      <MediaBadge type={book.mediaType} />
+                    </div>
                     {book.author && (
                       <div className="text-xs text-slate-600 dark:text-zinc-500">{book.author.authorName}</div>
                     )}
