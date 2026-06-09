@@ -145,25 +145,3 @@ type isbnResponse struct {
 	} `json:"authors"`
 	Covers []int `json:"covers"`
 }
-
-// subjectBooksResponse is the OpenLibrary /subjects/{subject}.json response.
-type subjectBooksResponse struct {
-	Name      string        `json:"name"`
-	WorkCount int           `json:"work_count"`
-	Works     []subjectWork `json:"works"`
-}
-
-// subjectWork is a single work entry inside subjectBooksResponse.
-// Note: the subjects API uses "cover_id" (not "cover_i" like the search API).
-type subjectWork struct {
-	Key     string `json:"key"` // "/works/OL123W"
-	Title   string `json:"title"`
-	Authors []struct {
-		Key  string `json:"key"` // "/authors/OL123A"
-		Name string `json:"name"`
-	} `json:"authors"`
-	CoverID          *int     `json:"cover_id"`
-	FirstPublishYear int      `json:"first_publish_year"`
-	Subject          []string `json:"subject"`
-	EditionCount     int      `json:"edition_count"`
-}

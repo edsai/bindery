@@ -519,37 +519,65 @@ func (c *Client) GetEditions(ctx context.Context, bookForeignID string) ([]model
 	return editions, nil
 }
 
-// GetSubjectBooks fetches the top books for an OpenLibrary subject.
-// subject should be a lowercase slug using underscores, e.g. "science_fiction" or "fantasy".
-// Returns candidates suitable for use as genre-popular recommendations.
+// GetSubjectBooks fetches the top-rated books for an OpenLibrary subject and
+// returns candidates suitable for genre-popular recommendations. subject is a
+// lowercase underscore slug, e.g. "science_fiction" or "fantasy".
+//
+// It queries the search index (/search.json?subject=…&sort=rating), NOT the
+// /subjects/{slug}.json endpoint. The subjects endpoint returns no ratings and
+// no language and is dominated by high-edition-count public-domain scans (so it
+// floods discovery with century-old classics and foreign catalog records that
+// the language and ratings filters cannot see). The search index returns
+// ratings_count/ratings_average + language per work and, sorted by rating,
+// surfaces popular, well-rated, contemporary works. (Same payload + parse as
+// searchAuthorWorks, plus author_name.)
 func (c *Client) GetSubjectBooks(ctx context.Context, subject string, limit int) ([]models.RecommendationCandidate, error) {
 	if limit <= 0 {
 		limit = 20
 	}
-	u := fmt.Sprintf("%s/subjects/%s.json?limit=%d", baseURL, url.PathEscape(subject), limit)
-	var resp subjectBooksResponse
+	u := fmt.Sprintf("%s/search.json?subject=%s&sort=rating&fields=key,title,author_name,language,subject,ratings_count,ratings_average,first_publish_year,cover_i&limit=%d",
+		baseURL, url.QueryEscape(subject), limit)
+	var resp struct {
+		Docs []struct {
+			Key              string   `json:"key"`
+			Title            string   `json:"title"`
+			AuthorName       []string `json:"author_name"`
+			Language         []string `json:"language"`
+			Subject          []string `json:"subject"`
+			RatingsCount     int      `json:"ratings_count"`
+			RatingsAverage   float64  `json:"ratings_average"`
+			FirstPublishYear int      `json:"first_publish_year"`
+			CoverI           *int     `json:"cover_i"`
+		} `json:"docs"`
+	}
 	if err := c.getJSON(ctx, u, &resp); err != nil {
 		return nil, fmt.Errorf("get subject books %q: %w", subject, err)
 	}
 
-	candidates := make([]models.RecommendationCandidate, 0, len(resp.Works))
-	for _, w := range resp.Works {
-		workID := strings.TrimPrefix(w.Key, "/works/")
+	candidates := make([]models.RecommendationCandidate, 0, len(resp.Docs))
+	for _, d := range resp.Docs {
+		workID := strings.TrimPrefix(d.Key, "/works/")
+		if workID == "" || d.Title == "" {
+			continue
+		}
 		cand := models.RecommendationCandidate{
-			ForeignID: workID,
-			Title:     w.Title,
-			Genres:    truncateSlice(w.Subject, 10),
-			MediaType: models.MediaTypeEbook,
+			ForeignID:    workID,
+			Title:        d.Title,
+			Genres:       truncateSlice(d.Subject, 10),
+			Language:     pickPreferredLanguage(d.Language),
+			Rating:       d.RatingsAverage,
+			RatingsCount: d.RatingsCount,
+			MediaType:    models.MediaTypeEbook,
 		}
-		if w.CoverID != nil && *w.CoverID > 0 {
-			cand.ImageURL = fmt.Sprintf("%s/b/id/%d-L.jpg", coverURL, *w.CoverID)
+		if len(d.AuthorName) > 0 {
+			cand.AuthorName = d.AuthorName[0]
 		}
-		if w.FirstPublishYear > 0 {
-			t := time.Date(w.FirstPublishYear, 1, 1, 0, 0, 0, 0, time.UTC)
+		if d.CoverI != nil && *d.CoverI > 0 {
+			cand.ImageURL = fmt.Sprintf("%s/b/id/%d-L.jpg", coverURL, *d.CoverI)
+		}
+		if d.FirstPublishYear > 0 {
+			t := time.Date(d.FirstPublishYear, 1, 1, 0, 0, 0, 0, time.UTC)
 			cand.ReleaseDate = &t
-		}
-		if len(w.Authors) > 0 {
-			cand.AuthorName = w.Authors[0].Name
 		}
 		candidates = append(candidates, cand)
 	}

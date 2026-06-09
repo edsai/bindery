@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/vavallee/bindery/internal/db"
+	"github.com/vavallee/bindery/internal/indexer"
 	"github.com/vavallee/bindery/internal/models"
 )
 
@@ -257,6 +258,11 @@ func GenerateGenrePopular(
 		for i := range books {
 			books[i].RecType = models.RecTypeGenrePopular
 			books[i].Reason = fmt.Sprintf("Popular in %s", genre)
+			// Backfill the canonical work key so dedupeByWork can collapse the same
+			// work surfaced under two top-genre queries (OL returns none for these).
+			if books[i].DedupKey == "" {
+				books[i].DedupKey = indexer.CanonicalDedupKey(books[i].Title)
+			}
 		}
 		candidates = append(candidates, books...)
 	}
