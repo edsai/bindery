@@ -942,26 +942,44 @@ func TestGetAuthorWorks_HTTP_NoiseFilterSearchEnrichment(t *testing.T) {
 	}
 }
 
-// --- GetSubjectBooks ---
+// --- GetSubjectBooks (OL search index, sorted by rating) ---
+
+// olSearchDoc / olSearchResp mirror the /search.json payload GetSubjectBooks now
+// consumes. The switch from /subjects to the search index is the whole point:
+// candidates carry ratings_count/ratings_average + language, which /subjects
+// never returns.
+type olSearchDoc struct {
+	Key              string   `json:"key"`
+	Title            string   `json:"title"`
+	AuthorName       []string `json:"author_name,omitempty"`
+	Language         []string `json:"language,omitempty"`
+	Subject          []string `json:"subject,omitempty"`
+	RatingsCount     int      `json:"ratings_count,omitempty"`
+	RatingsAverage   float64  `json:"ratings_average,omitempty"`
+	FirstPublishYear int      `json:"first_publish_year,omitempty"`
+	CoverI           *int     `json:"cover_i,omitempty"`
+}
+
+type olSearchResp struct {
+	NumFound int           `json:"numFound"`
+	Docs     []olSearchDoc `json:"docs"`
+}
 
 func TestGetSubjectBooks_HTTP(t *testing.T) {
 	coverID := 99999
-	resp := subjectBooksResponse{
-		Name:      "Fantasy",
-		WorkCount: 2,
-		Works: []subjectWork{
+	resp := olSearchResp{
+		NumFound: 2,
+		Docs: []olSearchDoc{
 			{
 				Key:              "/works/OL1111W",
 				Title:            "Popular Fantasy",
-				CoverID:          &coverID,
-				FirstPublishYear: 2015,
+				AuthorName:       []string{"Famous Author"},
+				Language:         []string{"eng"},
 				Subject:          []string{"Fantasy", "Adventure"},
-				Authors: []struct {
-					Key  string `json:"key"`
-					Name string `json:"name"`
-				}{
-					{Key: "/authors/OL10A", Name: "Famous Author"},
-				},
+				RatingsCount:     412,
+				RatingsAverage:   4.42,
+				FirstPublishYear: 2015,
+				CoverI:           &coverID,
 			},
 			{
 				Key:   "/works/OL2222W",
@@ -971,7 +989,7 @@ func TestGetSubjectBooks_HTTP(t *testing.T) {
 	}
 
 	c := newClientWithPaths(t, map[string]interface{}{
-		"/subjects/fantasy.json": jsonStr(resp),
+		"/search.json": jsonStr(resp),
 	})
 
 	candidates, err := c.GetSubjectBooks(context.Background(), "fantasy", 20)
@@ -992,6 +1010,16 @@ func TestGetSubjectBooks_HTTP(t *testing.T) {
 	if first.AuthorName != "Famous Author" {
 		t.Errorf("AuthorName: want 'Famous Author', got %q", first.AuthorName)
 	}
+	// New signal the source swap delivers: ratings + language are populated.
+	if first.RatingsCount != 412 {
+		t.Errorf("RatingsCount: want 412, got %d", first.RatingsCount)
+	}
+	if first.Rating != 4.42 {
+		t.Errorf("Rating: want 4.42, got %v", first.Rating)
+	}
+	if first.Language != "eng" {
+		t.Errorf("Language: want 'eng', got %q", first.Language)
+	}
 	if first.ReleaseDate == nil || first.ReleaseDate.Year() != 2015 {
 		t.Errorf("ReleaseDate: expected 2015, got %v", first.ReleaseDate)
 	}
@@ -1005,7 +1033,7 @@ func TestGetSubjectBooks_HTTP(t *testing.T) {
 		t.Errorf("Genres: want 2, got %d", len(first.Genres))
 	}
 
-	// Second candidate: no cover, no authors.
+	// Second candidate: no cover, no author, no language.
 	second := candidates[1]
 	if second.ImageURL != "" {
 		t.Errorf("second ImageURL should be empty, got %q", second.ImageURL)
@@ -1013,31 +1041,37 @@ func TestGetSubjectBooks_HTTP(t *testing.T) {
 	if second.AuthorName != "" {
 		t.Errorf("second AuthorName should be empty, got %q", second.AuthorName)
 	}
+	if second.Language != "" {
+		t.Errorf("second Language should be empty, got %q", second.Language)
+	}
 }
 
-func TestGetSubjectBooks_HTTP_DefaultLimit(t *testing.T) {
-	// Limit <= 0 defaults to 20. Assert the URL passed to the server contains limit=20.
+func TestGetSubjectBooks_HTTP_QueryParams(t *testing.T) {
+	// Limit <= 0 defaults to 20; the query must hit the search index, sorted by
+	// rating, filtered to the requested subject.
 	var gotURL string
 	c := newClientWithPaths(t, map[string]interface{}{
-		"/subjects/scifi.json": func(r *http.Request) string {
+		"/search.json": func(r *http.Request) string {
 			gotURL = r.URL.String()
-			return jsonStr(subjectBooksResponse{})
+			return jsonStr(olSearchResp{})
 		},
 	})
 
-	_, err := c.GetSubjectBooks(context.Background(), "scifi", 0)
+	_, err := c.GetSubjectBooks(context.Background(), "science_fiction", 0)
 	if err != nil {
 		t.Fatalf("GetSubjectBooks: %v", err)
 	}
-	if !strings.Contains(gotURL, "limit=20") {
-		t.Errorf("URL should default limit to 20, got %q", gotURL)
+	for _, want := range []string{"limit=20", "sort=rating", "subject=science_fiction"} {
+		if !strings.Contains(gotURL, want) {
+			t.Errorf("URL %q should contain %q", gotURL, want)
+		}
 	}
 }
 
 func TestGetSubjectBooks_HTTP_Error(t *testing.T) {
 	c := newClientWithStatus(t,
-		map[string]interface{}{"/subjects/horror.json": "oops"},
-		map[string]int{"/subjects/horror.json": http.StatusInternalServerError},
+		map[string]interface{}{"/search.json": "oops"},
+		map[string]int{"/search.json": http.StatusInternalServerError},
 	)
 	_, err := c.GetSubjectBooks(context.Background(), "horror", 5)
 	if err == nil {
@@ -1047,7 +1081,7 @@ func TestGetSubjectBooks_HTTP_Error(t *testing.T) {
 
 func TestGetSubjectBooks_HTTP_Empty(t *testing.T) {
 	c := newClientWithPaths(t, map[string]interface{}{
-		"/subjects/obscure.json": jsonStr(subjectBooksResponse{Name: "Obscure"}),
+		"/search.json": jsonStr(olSearchResp{}),
 	})
 	candidates, err := c.GetSubjectBooks(context.Background(), "obscure", 5)
 	if err != nil {
@@ -1059,15 +1093,15 @@ func TestGetSubjectBooks_HTTP_Empty(t *testing.T) {
 }
 
 func TestGetSubjectBooks_HTTP_NegativeCover(t *testing.T) {
-	// OpenLibrary sometimes returns cover_id=-1 meaning "no cover". Must not build a URL.
+	// OpenLibrary sometimes returns cover_i=-1 meaning "no cover". Must not build a URL.
 	negCover := -1
-	resp := subjectBooksResponse{
-		Works: []subjectWork{
-			{Key: "/works/OL9W", Title: "No Cover", CoverID: &negCover},
+	resp := olSearchResp{
+		Docs: []olSearchDoc{
+			{Key: "/works/OL9W", Title: "No Cover", CoverI: &negCover},
 		},
 	}
 	c := newClientWithPaths(t, map[string]interface{}{
-		"/subjects/romance.json": jsonStr(resp),
+		"/search.json": jsonStr(resp),
 	})
 
 	candidates, err := c.GetSubjectBooks(context.Background(), "romance", 5)
