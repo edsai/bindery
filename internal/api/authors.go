@@ -1104,6 +1104,64 @@ func (h *AuthorHandler) isAutoGrabEnabled(ctx context.Context) bool {
 	return s.Value != "false"
 }
 
+// canEnrichAuthorFromOL reports whether an author created from a non-OpenLibrary
+// provider (Hardcover/Google Books/DNB) is a candidate for profile enrichment
+// from OpenLibrary. Calibre stubs have their own re-link path; already-OL authors
+// need nothing.
+func canEnrichAuthorFromOL(author *models.Author) bool {
+	if author == nil {
+		return false
+	}
+	if strings.HasPrefix(author.ForeignID, "calibre:") {
+		return false
+	}
+	return author.MetadataProvider != "openlibrary" && !strings.HasPrefix(author.ForeignID, "OL")
+}
+
+// relinkAuthorToOL rebinds an author to OpenLibrary's record for the same person
+// (richest canonical-name match), adopting its profile — foreign_id, provider,
+// bio, image, sort name, disambiguation, ratings — in place. It only adopts the
+// PROFILE; the caller decides whether to also pull the OL bibliography (it must
+// not, for an unmonitored author). Returns errNoMetadataMatch when OpenLibrary
+// has no confident record, leaving the author on its original provider.
+func (h *AuthorHandler) relinkAuthorToOL(ctx context.Context, author *models.Author) error {
+	if h.meta == nil {
+		return errNoMetadataAggregator
+	}
+	full, err := h.meta.ResolveCanonicalAuthor(ctx, author.Name)
+	if err != nil {
+		return err
+	}
+	if full == nil {
+		return errNoMetadataMatch
+	}
+	author.ForeignID = full.ForeignID
+	author.MetadataProvider = "openlibrary"
+	if full.ImageURL != "" {
+		author.ImageURL = full.ImageURL
+	}
+	if desc := textutil.CleanDescription(full.Description); desc != "" {
+		author.Description = desc
+	}
+	if full.SortName != "" {
+		author.SortName = full.SortName
+	}
+	if full.Disambiguation != "" {
+		author.Disambiguation = full.Disambiguation
+	}
+	if full.RatingsCount > 0 {
+		author.RatingsCount = full.RatingsCount
+	}
+	if full.AverageRating > 0 {
+		author.AverageRating = full.AverageRating
+	}
+	if err := h.authors.Update(ctx, author); err != nil {
+		return err
+	}
+	slog.Info("enriched author profile from OpenLibrary", "author", author.Name, "newForeignId", author.ForeignID)
+	return nil
+}
+
 // relinkCalibreAuthor looks up a calibre-imported author by name in the
 // configured metadata provider and, on the first match, rewrites the row's
 // foreign_id, metadata_provider, image, description, and sort_name in place
@@ -1189,6 +1247,21 @@ func (h *AuthorHandler) FetchAuthorBooks(author *models.Author, autoSearch bool,
 	if strings.HasPrefix(author.ForeignID, "calibre:") {
 		if err := h.relinkCalibreAuthor(ctx, author); err != nil {
 			slog.Info("calibre author not re-linked to metadata provider", "author", author.Name, "reason", err)
+			return
+		}
+	} else if canEnrichAuthorFromOL(author) {
+		// The author was created from a non-OpenLibrary provider (e.g. a
+		// Hardcover-sourced book) whose author profile is thin. Adopt OpenLibrary's
+		// richer record for this person so the author page isn't blank.
+		if err := h.relinkAuthorToOL(ctx, author); err != nil {
+			slog.Info("author profile not enriched from OpenLibrary", "author", author.Name, "reason", err)
+		}
+		// Decouple bibliography adoption from profile enrichment: a speculative
+		// rebind on an UNMONITORED author (the single-book Add case) must not pull
+		// a possibly-mis-bound bibliography into the library. The OL catalogue is
+		// adopted only once the user monitors the author — a deliberate checkpoint
+		// taken after the (now-visible) profile confirms the right person.
+		if !author.Monitored {
 			return
 		}
 	}

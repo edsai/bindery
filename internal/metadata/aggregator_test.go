@@ -298,6 +298,63 @@ func TestAggregator_SearchAuthors_RanksRelevanceAcrossProviders(t *testing.T) {
 	}
 }
 
+// TestAggregator_ResolveCanonicalAuthor covers cross-provider author enrichment:
+// given a name, find the richest OpenLibrary record (canonical, inversion-aware
+// match, most works) and return its full profile — used to enrich authors
+// created from providers with thin profiles (e.g. Hardcover).
+func TestAggregator_ResolveCanonicalAuthor(t *testing.T) {
+	primary := &mockProvider{
+		name: "ol",
+		searchAuthors: []models.Author{
+			{Name: "Brooks, Arthur C.", ForeignID: "OL3A", Statistics: &models.AuthorStats{BookCount: 14}, RatingsCount: 200},
+		},
+		getAuthor: &models.Author{Name: "Brooks, Arthur C.", ForeignID: "OL3A", Description: "Happiness researcher.", ImageURL: "http://img/3"},
+	}
+	enricher := &mockProvider{name: "hardcover", searchAuthors: []models.Author{{Name: "Arthur C. Brooks", ForeignID: "hc:arthur-c-brooks"}}}
+	agg := newTestAggregator(primary, enricher)
+
+	got, err := agg.ResolveCanonicalAuthor(context.Background(), "Arthur C Brooks")
+	if err != nil {
+		t.Fatalf("ResolveCanonicalAuthor: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected an OL enrichment record, got nil")
+	}
+	if got.ForeignID != "OL3A" {
+		t.Errorf("ForeignID: want OL3A, got %q", got.ForeignID)
+	}
+	if got.Description == "" || got.ImageURL == "" {
+		t.Errorf("expected bio+image from GetAuthor, got desc=%q img=%q", got.Description, got.ImageURL)
+	}
+	if got.RatingsCount != 200 {
+		t.Errorf("expected ratings carried from the search record, got %d", got.RatingsCount)
+	}
+}
+
+func TestAggregator_ResolveCanonicalAuthor_NoOLRecord(t *testing.T) {
+	primary := &mockProvider{name: "ol"} // OL returns nothing
+	enricher := &mockProvider{name: "hardcover", searchAuthors: []models.Author{{Name: "Arthur C. Brooks", ForeignID: "hc:arthur-c-brooks"}}}
+	agg := newTestAggregator(primary, enricher)
+	got, err := agg.ResolveCanonicalAuthor(context.Background(), "Arthur C Brooks")
+	if err != nil {
+		t.Fatalf("ResolveCanonicalAuthor: %v", err)
+	}
+	if got != nil {
+		t.Errorf("no OL record exists; expected nil, got %+v", got)
+	}
+}
+
+func TestAggregator_ResolveCanonicalAuthor_SkipsEmptyStub(t *testing.T) {
+	primary := &mockProvider{name: "ol", searchAuthors: []models.Author{
+		{Name: "Arthur C. Brooks", ForeignID: "OL9A", Statistics: &models.AuthorStats{BookCount: 0}},
+	}}
+	agg := newTestAggregator(primary)
+	got, _ := agg.ResolveCanonicalAuthor(context.Background(), "Arthur C Brooks")
+	if got != nil {
+		t.Errorf("0-works OL stub should not be adopted, got %+v", got)
+	}
+}
+
 func TestAggregator_GetAuthor_Success(t *testing.T) {
 	author := &models.Author{Name: "Ursula K. Le Guin", ForeignID: "OL111A"}
 	primary := &mockProvider{name: "ol", getAuthor: author}
